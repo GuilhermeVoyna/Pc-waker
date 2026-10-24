@@ -56,36 +56,58 @@ std::string getHostName(const char* topic) {
         static_cast<std::size_t>(end - start)
     );
 }
-void MessageHandler::handle(char* topic, byte* payload, unsigned int length) {
+void MessageHandler::handle(
+    char* topic,
+    byte* payload,
+    unsigned int length
+) {
+    if (topic == nullptr || (payload == nullptr && length > 0)) {
+        Serial.println("[MESSAGE] Mensagem invalida.");
+        return;
+    }
 
-    // Converte payload para String
     String message;
-    for (int i = 0; i < length; i++) {
-        message += (char)payload[i];
+    message.reserve(length);
+
+    for (unsigned int i = 0; i < length; i++) {
+        message += static_cast<char>(payload[i]);
     }
 
-    Serial.print("Topic recebido: ");
-    Serial.println(topic);
+    message.trim();
 
-    Serial.print("Payload: ");
-    Serial.println(message);
+    Serial.printf("[MESSAGE] Topico: %s\n", topic);
+    Serial.printf("[MESSAGE] Payload: %s\n", message.c_str());
 
-    // Roteamento por tópico
-    if (strcmp(topic, PC_BROADCAST_TOPIC) == 0){
-        pcController.handleBroadCast(message);
-        led.blink(222, 2);
-    }
-    
-    if (isCommandTopic(topic)) {
-        std::string hostName = getHostName(topic);
-        pcController.handleCommand(hostName, message);
-        led.blink(222, 2);
-    }
-
+    // Prioridade 1: estado dos computadores.
     if (isStatusTopic(topic)) {
         hostConfig.processHosts(message);
+        return;
     }
-    else {
-        Serial.println("Tópico não tratado.");
+
+    // Prioridade 2: comandos.
+    if (isCommandTopic(topic)) {
+        // O broadcast também corresponde a pc/+/command.
+        if (strcmp(topic, PC_BROADCAST_TOPIC) == 0) {
+            Serial.println("[ROUTER] Comando broadcast.");
+
+            pcController.handleBroadCast(message);
+        } else {
+            std::string hostName = getHostName(topic);
+
+            Serial.printf(
+                "[ROUTER] Comando individual para: %s\n",
+                hostName.c_str()
+            );
+
+            pcController.handleCommand(hostName, message);
+        }
+
+        led.blink(222, 2);
+        return;
     }
+
+    Serial.printf(
+        "[ROUTER] Topico nao tratado: %s\n",
+        topic
+    );
 }

@@ -7,36 +7,84 @@
 static WiFiUDP udp;
 
 
-void PCController::handleCommand(std::string host, String message) {
-    if (message == "turn_on" || message == "wake") {
-        
-        Serial.print("Comando recebido para host: ");
-        Serial.println(host.c_str());
-        const byte* mac = hostConfig.getMacAddress(host);
-        if (mac == nullptr) {
-            Serial.print("MAC não encontrado para o host: ");
-            Serial.println(host.c_str());
-        } else {
-            if (sendWakeOnLan(mac)) {
-                Serial.println("Wake-on-LAN enviado com sucesso!");
-            } else {
-                Serial.println("Falha ao enviar Wake-on-LAN.");
-            }
-        }
+void PCController::handleCommand(
+    std::string host,
+    String message
+) {
+    if (message != "turn_on" && message != "wake") {
+        Serial.printf(
+            "[WOL] Comando desconhecido: %s\n",
+            message.c_str()
+        );
+        return;
     }
-    else {
-        Serial.println("Comando desconhecido");
+
+    if (host == "all") {
+        Serial.println(
+            "[WOL] ERRO: 'all' nao pode ser tratado como host."
+        );
+        return;
+    }
+
+    Serial.printf("[WOL] Host destino: %s\n", host.c_str());
+
+    const byte* mac = hostConfig.getMacAddress(host);
+
+    if (mac == nullptr) {
+        Serial.printf(
+            "[WOL] ERRO: MAC nao encontrado para %s.\n",
+            host.c_str()
+        );
+        return;
+    }
+
+    Serial.printf(
+        "[WOL] MAC alvo: %02X:%02X:%02X:%02X:%02X:%02X\n",
+        mac[0], mac[1], mac[2],
+        mac[3], mac[4], mac[5]
+    );
+
+    if (sendWakeOnLan(mac)) {
+        Serial.println(
+            "[WOL] Magic Packet enviado para o MAC acima."
+        );
+    } else {
+        Serial.println("[WOL] Falha no envio do Magic Packet.");
     }
 }
 
 void PCController::handleBroadCast(String message) {
-    for (const auto& host : hostConfig.getHosts()) {
-        Serial.print("Enviando broadcast para host: ");
-        Serial.println(host.name.c_str());
+    if (message != "turn_on" && message != "wake") {
+        Serial.printf(
+            "[WOL] Comando broadcast desconhecido: %s\n",
+            message.c_str()
+        );
+        return;
+    }
+
+    const auto& hosts = hostConfig.getHosts();
+
+    if (hosts.empty()) {
+        Serial.println(
+            "[WOL] Nenhum computador cadastrado. "
+            "Nao ha MACs para enviar."
+        );
+        return;
+    }
+
+    Serial.printf(
+        "[WOL] Broadcast logico para %u computador(es).\n",
+        static_cast<unsigned int>(hosts.size())
+    );
+
+    for (const auto& host : hosts) {
+        if (host.name == "all") {
+            continue;
+        }
+
         handleCommand(host.name, message);
     }
 }
-
 
 
 bool PCController::sendWakeOnLan(const byte* macAddress) {
