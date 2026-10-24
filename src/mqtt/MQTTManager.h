@@ -18,6 +18,8 @@ private:
     unsigned long reconnectInterval;
     bool reconnectScheduled;
 
+    static MQTTManager* activeInstance;
+
     static void callbackStatic(
         char* topic,
         byte* payload,
@@ -49,6 +51,8 @@ public:
     bool connected() {
         return client.connected();
     }
+
+    bool cleanupRetainedMessage(const char* topic);
 };
 
 #endif

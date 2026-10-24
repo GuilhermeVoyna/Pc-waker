@@ -6,6 +6,11 @@
 #include "config/Topics.h"
 #include "messaging/MessageHandler.h"
 #include "led/LED.h"
+#include "config/root_ca.h"
+
+// Instância utilizada pelo callback estático do PubSubClient.
+MQTTManager* MQTTManager::activeInstance = nullptr;
+
 
 MQTTManager::MQTTManager(
     NetworkConfig* config,
@@ -18,12 +23,13 @@ MQTTManager::MQTTManager(
       nextReconnectAttempt(0),
       reconnectInterval(1000),
       reconnectScheduled(false) {
+    activeInstance = this;
 }
 
+
 void MQTTManager::begin() {
-    // Mantém a configuração atual.
-    // A validação do certificado TLS precisa ser corrigida separadamente.
-    espClient->setInsecure();
+    // Valida o certificado do servidor durante a conexão TLS.
+    espClient->setCACert(HIVEMQ_ROOT_CA);
 
     client.setServer(
         config->mqtt_server,
@@ -32,43 +38,146 @@ void MQTTManager::begin() {
 
     client.setCallback(callbackStatic);
 
-    // Limita o tempo de espera das operações de socket.
     client.setSocketTimeout(5);
     client.setKeepAlive(30);
 
-    Serial.println("MQTTManager inicializado.");
+    Serial.println(
+        "MQTTManager inicializado com validacao TLS."
+    );
 }
 
+
+// Callback estático chamado pelo PubSubClient.
 void MQTTManager::callbackStatic(
     char* topic,
     byte* payload,
     unsigned int length
 ) {
-    Serial.print("Mensagem recebida [");
-    Serial.print(topic);
-    Serial.print("]: ");
-
-    for (unsigned int i = 0; i < length; i++) {
-        Serial.print(static_cast<char>(payload[i]));
+    if (topic == nullptr || payload == nullptr) {
+        Serial.println("[MQTT] Mensagem invalida.");
+        return;
     }
 
-    Serial.println();
+    if (activeInstance == nullptr) {
+        Serial.println("[MQTT] MQTTManager indisponivel.");
+        return;
+    }
 
+    // Mensagens MQTT podem conter bytes nulos.
+    String message;
+    message.reserve(length);
+
+    for (unsigned int i = 0; i < length; i++) {
+        message += static_cast<char>(payload[i]);
+    }
+
+    message.trim();
+
+    Serial.printf("[MQTT] Topico: %s\n", topic);
+    Serial.printf("[MQTT] Payload: %s\n", message.c_str());
+
+    // --------------------------------------------------
+    // COMANDO CLEAN
+    // --------------------------------------------------
+
+    // "clean": limpa a mensagem retida do tópico recebido.
+    if (message.equalsIgnoreCase("clean")) {
+        activeInstance->cleanupRetainedMessage(topic);
+        return;
+    }
+
+    // "clean pc/atibaia/status":
+    // limpa a mensagem retida do tópico informado.
+    if (
+        message.length() > 6 &&
+        message.substring(0, 6).equalsIgnoreCase("clean ")
+    ) {
+        String target = message.substring(6);
+        target.trim();
+
+        bool validTarget = false;
+
+        // Aceita exclusivamente pc/<hostname>/status.
+        if (target.startsWith("pc/")) {
+            const int firstSlash = target.indexOf('/', 3);
+
+            if (
+                firstSlash > 3 &&
+                target.substring(firstSlash + 1) == "status" &&
+                target.indexOf('/', firstSlash + 1) == -1
+            ) {
+                String hostname = target.substring(3, firstSlash);
+
+                validTarget = !hostname.isEmpty();
+
+                // Impede curingas MQTT e caracteres inesperados.
+                for (unsigned int i = 0; i < hostname.length(); i++) {
+                    const char c = hostname[i];
+
+                    const bool allowed =
+                        (c >= 'a' && c <= 'z') ||
+                        (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') ||
+                        c == '-' ||
+                        c == '_' ||
+                        c == '.';
+
+                    if (!allowed) {
+                        validTarget = false;
+                        break;
+                    }
+                }
+
+                // "all" não representa um computador individual.
+                if (hostname.equalsIgnoreCase("all")) {
+                    validTarget = false;
+                }
+            }
+        }
+
+        if (!validTarget) {
+            Serial.println(
+                "[CLEANUP] Topico invalido. "
+                "Use: clean pc/<hostname>/status"
+            );
+            return;
+        }
+
+        activeInstance->cleanupRetainedMessage(
+            target.c_str()
+        );
+
+        return;
+    }
+
+    // Não encaminha mensagens vazias para o handler.
+    if (length == 0) {
+        Serial.println("[MQTT] Payload vazio ignorado.");
+        return;
+    }
+
+    // Mensagem normal.
     led.blink(111, 1);
 
     MessageHandler handler;
     handler.handle(topic, payload, length);
 }
 
+
+// Mantido para compatibilidade com a estrutura existente.
 void MQTTManager::callback(
     char* topic,
     byte* payload,
     unsigned int length
 ) {
-    // Mantido para compatibilidade com a estrutura atual.
     MessageHandler handler;
     handler.handle(topic, payload, length);
 }
+
+
+// --------------------------------------------------
+// RECONEXAO MQTT
+// --------------------------------------------------
 
 void MQTTManager::reconnect() {
     if (client.connected()) {
@@ -83,9 +192,7 @@ void MQTTManager::reconnect() {
 
     const unsigned long now = millis();
 
-    // Ainda não chegou o momento da próxima tentativa.
-    // A subtração com long também permite lidar com o rollover
-    // de millis(), desde que o intervalo seja inferior a 2^31 ms.
+    // Aguarda o próximo intervalo de reconexão.
     if (
         reconnectScheduled &&
         static_cast<long>(now - nextReconnectAttempt) < 0
@@ -95,7 +202,7 @@ void MQTTManager::reconnect() {
 
     reconnectScheduled = false;
 
-    // Gera um identificador estável a partir do MAC da ESP32.
+    // Identificador estável derivado do MAC da ESP32.
     String mac = WiFi.macAddress();
     mac.replace(":", "");
 
@@ -123,25 +230,31 @@ void MQTTManager::reconnect() {
         const bool statusSubscribed =
             client.subscribe(PC_STATUS_TOPIC);
 
-        if (
-            !commandSubscribed ||
-            !broadcastSubscribed ||
-            !statusSubscribed
-        ) {
-            Serial.println(
-                "Aviso: falha ao assinar um ou mais tópicos MQTT."
-            );
-        } else {
-            Serial.println("Todos os tópicos foram assinados.");
-        }
+        Serial.println("ASSINATURAS MQTT:");
 
-        // A conexão foi estabelecida.
+        Serial.printf(
+            "Comandos: [%s] %s\n",
+            commandSubscribed ? "OK" : "ERRO",
+            PC_COMMAND_TOPIC
+        );
+
+        Serial.printf(
+            "Broadcast: [%s] %s\n",
+            broadcastSubscribed ? "OK" : "ERRO",
+            PC_BROADCAST_TOPIC
+        );
+
+        Serial.printf(
+            "Status: [%s] %s\n",
+            statusSubscribed ? "OK" : "ERRO",
+            PC_STATUS_TOPIC
+        );
+
         reconnectInterval = 1000;
         reconnectScheduled = false;
 
         led.off();
     } else {
-        // Agenda a próxima tentativa sem usar delay().
         const unsigned long retryDelay = reconnectInterval;
 
         Serial.printf(
@@ -164,6 +277,11 @@ void MQTTManager::reconnect() {
     }
 }
 
+
+// --------------------------------------------------
+// LOOP MQTT
+// --------------------------------------------------
+
 void MQTTManager::loop() {
     if (WiFi.status() != WL_CONNECTED) {
         reconnectScheduled = false;
@@ -178,13 +296,18 @@ void MQTTManager::loop() {
     client.loop();
 }
 
+
+// --------------------------------------------------
+// PUBLICACAO MQTT
+// --------------------------------------------------
+
 void MQTTManager::publish(
     const char* topic,
     const char* message
 ) {
     if (!client.connected()) {
         Serial.println(
-            "Mensagem não publicada: MQTT desconectado."
+            "Mensagem nao publicada: MQTT desconectado."
         );
         return;
     }
@@ -192,4 +315,44 @@ void MQTTManager::publish(
     if (!client.publish(topic, message)) {
         Serial.println("Falha ao publicar mensagem MQTT.");
     }
+}
+
+
+// --------------------------------------------------
+// LIMPEZA DE MENSAGENS RETIDAS
+// --------------------------------------------------
+
+bool MQTTManager::cleanupRetainedMessage(
+    const char* topic
+) {
+    if (topic == nullptr || topic[0] == '\0') {
+        Serial.println("[CLEANUP] Topico vazio ou invalido.");
+        return false;
+    }
+
+    if (!client.connected()) {
+        Serial.println("[CLEANUP] MQTT desconectado.");
+        return false;
+    }
+
+    // Payload vazio com retain=true solicita a exclusao
+    // da mensagem retida nesse tópico.
+    const uint8_t emptyPayload = 0;
+
+    const bool success = client.publish(
+        topic,
+        &emptyPayload,
+        0,
+        true
+    );
+
+    Serial.printf(
+        "[CLEANUP] %s: %s\n",
+        topic,
+        success
+            ? "solicitacao enviada"
+            : "falha ao publicar"
+    );
+
+    return success;
 }
