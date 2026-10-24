@@ -4,6 +4,9 @@
 #include "led/LED.h"
 #include "config/HostConfig.h"
 
+#include <cstring>
+#include <string>
+
 HostConfig hostConfig;
 PCController pcController(hostConfig);
 
@@ -25,22 +28,33 @@ bool isPcTopicWithSuffix(const char* topic, const char* suffix) {
 bool isStatusTopic(const char* topic) { return isPcTopicWithSuffix(topic, "status"); }
 bool isCommandTopic(const char* topic){ return isPcTopicWithSuffix(topic, "command"); }
 
+
 std::string getHostName(const char* topic) {
-    const char* prefix = "pc/";
-    size_t prefixLen = strlen(prefix);
-    const char* start = topic + prefixLen;
-    const char* end = strrchr(topic, '/');
-    
-    if (end == nullptr || end <= start) {
-        return ""; // Tópico mal formado
+    if (topic == nullptr) {
+        return "";
     }
 
-    size_t hostLen = end - start;
-    char* hostName = new char[hostLen + 1];
-    strncpy(hostName, start, hostLen);
-    hostName[hostLen] = '\0';
+    constexpr char prefix[] = "pc/";
+    constexpr std::size_t prefixLen = sizeof(prefix) - 1;
 
-    return std::string(hostName);
+    // Verifica se o tópico começa com "pc/"
+    if (std::strncmp(topic, prefix, prefixLen) != 0) {
+        return "";
+    }
+
+    const char* start = topic + prefixLen;
+    const char* end = std::strrchr(start, '/');
+
+    // Valida o formato do tópico
+    if (end == nullptr || end == start || end[1] == '\0') {
+        return "";
+    }
+
+    // Cria a string diretamente, sem alocação manual
+    return std::string(
+        start,
+        static_cast<std::size_t>(end - start)
+    );
 }
 void MessageHandler::handle(char* topic, byte* payload, unsigned int length) {
 

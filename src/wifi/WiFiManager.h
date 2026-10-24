@@ -2,20 +2,34 @@
 #define WIFI_MANAGER_H
 
 #include <WiFi.h>
-#include <time.h>
 #include "config/NetworkConfig.h"
 
 class WiFiManager {
-  private:
+private:
     NetworkConfig* config;
-    const char* getWiFiStatus(wl_status_t status);
+
+    unsigned long lastConnectionAttempt;
+    unsigned long lastStatusPrint;
+    unsigned long lastNtpCheck;
+
+    bool wasConnected;
+    bool ntpStarted;
+    bool timeSynced;
+
+public:
+    explicit WiFiManager(NetworkConfig* config);
+
+    static const char* getWiFiStatus(wl_status_t status);
+
     void connect();
     void syncTime();
-
-  public:
-    WiFiManager(NetworkConfig* config);
     void begin();
 
+    // Deve ser chamada continuamente no loop principal.
+    void loop();
+
+    bool isConnected() const;
+    bool isTimeSynced() const;
 };
 
 #endif

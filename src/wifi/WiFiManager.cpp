@@ -1,105 +1,162 @@
 #include "wifi/WiFiManager.h"
-#include "config/NetworkConfig.h"
 
-WiFiManager::WiFiManager(NetworkConfig* config) {
-    this->config = config;
+#include <Arduino.h>
+#include <time.h>
+
+WiFiManager::WiFiManager(NetworkConfig* config)
+    : config(config),
+      lastConnectionAttempt(0),
+      lastStatusPrint(0),
+      lastNtpCheck(0),
+      wasConnected(false),
+      ntpStarted(false),
+      timeSynced(false) {
 }
+
 const char* WiFiManager::getWiFiStatus(wl_status_t status) {
     switch (status) {
-        case WL_IDLE_STATUS:       return "IDLE";               // 0
-        case WL_NO_SSID_AVAIL:     return "NO SSID AVAILABLE";  // 1
-        case WL_SCAN_COMPLETED:    return "SCAN COMPLETED";    // 2
-        case WL_CONNECTED:         return "CONNECTED";          // 3
-        case WL_CONNECT_FAILED:    return "CONNECT FAILED";    // 4
-        case WL_CONNECTION_LOST:   return "CONNECTION LOST";   // 5
-        case WL_DISCONNECTED:      return "DISCONNECTED";      // 6
-        default:                   return "UNKNOWN STATUS";
+        case WL_IDLE_STATUS:
+            return "IDLE";
+
+        case WL_NO_SSID_AVAIL:
+            return "NO SSID AVAILABLE";
+
+        case WL_SCAN_COMPLETED:
+            return "SCAN COMPLETED";
+
+        case WL_CONNECTED:
+            return "CONNECTED";
+
+        case WL_CONNECT_FAILED:
+            return "CONNECT FAILED";
+
+        case WL_CONNECTION_LOST:
+            return "CONNECTION LOST";
+
+        case WL_DISCONNECTED:
+            return "DISCONNECTED";
+
+        default:
+            return "UNKNOWN STATUS";
     }
 }
 
 void WiFiManager::connect() {
-    WiFi.disconnect(true, true); // Limpa conexões antigas
-    WiFi.mode(WIFI_STA);         // Garante modo estação
+    WiFi.mode(WIFI_STA);
+
+    // O gerenciamento das tentativas será feito neste módulo.
+    WiFi.setAutoReconnect(false);
+
+    Serial.println("Iniciando conexão Wi-Fi...");
+
     WiFi.begin(config->ssid, config->password);
 
-    Serial.print("Connecting to WiFi");
-
-    int attempts = 0;
-    const int maxAttempts = 20;
-
-    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-        delay(1000);
-        attempts++;
-
-        Serial.print(" | Attempt: ");
-        Serial.print(attempts);
-        Serial.print(" | Status: ");
-        Serial.println(getWiFiStatus(WiFi.status()));
-
-        if  (WiFi.status() == WL_CONNECT_FAILED) {
-            WiFi.disconnect(true, true); 
-            delay(500);
-            WiFi.begin(config->ssid, config->password);
-        }
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi connected!");
-        Serial.print("IP: ");
-        Serial.println(WiFi.localIP());
-    } else {
-        Serial.println("\nFailed to connect to WiFi, restarting...");
-        ESP.restart();
-    }
+    lastConnectionAttempt = millis();
+    lastStatusPrint = 0;
 }
 
 void WiFiManager::syncTime() {
-    // Ajuste de fuso horário -3 horas (Brasília)
-    const long gmtOffset_sec = -3 * 3600;
-    const int daylightOffset_sec = 0;
+    // Fuso horário de Brasília: UTC-3.
+    constexpr long gmtOffsetSec = -3 * 3600;
+    constexpr int daylightOffsetSec = 0;
 
-    // Lista de servidores NTP
-    const char* ntpServers[] = {"pool.ntp.org", "time.google.com", "time.windows.com"};
-    const int ntpCount = sizeof(ntpServers) / sizeof(ntpServers[0]);
+    Serial.println("Configurando sincronização NTP...");
 
-    Serial.println("Synchronizing NTP time...");
+    // Configura vários servidores. A sincronização acontece
+    // em segundo plano, sem um loop de espera.
+    configTime(
+        gmtOffsetSec,
+        daylightOffsetSec,
+        "pool.ntp.org",
+        "time.google.com",
+        "time.windows.com"
+    );
 
-    bool synced = false;
-    for (int i = 0; i < ntpCount && !synced; i++) {
-        configTime(gmtOffset_sec, daylightOffset_sec, ntpServers[i]);
-        
-        time_t now;
-        int attempts = 0;
-        const int maxAttempts = 20;
-
-        do {
-            delay(1000);
-            now = time(nullptr);
-            attempts++;
-
-            Serial.print(".");
-            Serial.print(" Attempt #");
-            Serial.print(attempts);
-            Serial.print(" | Server: ");
-            Serial.println(ntpServers[i]);
-        } while (now < 100000 && attempts < maxAttempts);
-
-        if (now >= 100000) {
-            synced = true;
-            Serial.println("\nTime synchronized!");
-            Serial.println(ctime(&now));
-        } else {
-            Serial.print("Failed to sync with ");
-            Serial.println(ntpServers[i]);
-        }
-    }
-
-    if (!synced) {
-        Serial.println("Failed to synchronize time with all servers. Using system uptime as fallback.");
-    }
+    ntpStarted = true;
+    timeSynced = false;
+    lastNtpCheck = 0;
 }
 
 void WiFiManager::begin() {
     connect();
     syncTime();
+}
+
+void WiFiManager::loop() {
+    const unsigned long now = millis();
+    const wl_status_t status = WiFi.status();
+
+    if (status == WL_CONNECTED) {
+        if (!wasConnected) {
+            wasConnected = true;
+
+            Serial.println("Wi-Fi conectado!");
+            Serial.print("IP: ");
+            Serial.println(WiFi.localIP());
+        }
+
+        // O SNTP sincroniza o relógio em segundo plano.
+        if (ntpStarted && !timeSynced) {
+            if (
+                lastNtpCheck == 0 ||
+                now - lastNtpCheck >= 5000
+            ) {
+                lastNtpCheck = now;
+
+                const time_t currentTime = time(nullptr);
+
+                // Evita tratar um relógio ainda não sincronizado
+                // como horário válido.
+                if (currentTime >= 1700000000) {
+                    timeSynced = true;
+
+                    Serial.println("Horário sincronizado!");
+
+                    Serial.print(
+                        "Data/hora: "
+                    );
+
+                    Serial.print(ctime(&currentTime));
+                } else {
+                    Serial.println(
+                        "Aguardando sincronização NTP..."
+                    );
+                }
+            }
+        }
+
+        return;
+    }
+
+    if (wasConnected) {
+        wasConnected = false;
+        Serial.println("Conexão Wi-Fi perdida.");
+    }
+
+    // Informa o estado sem imprimir em todas as iterações.
+    if (
+        lastStatusPrint == 0 ||
+        now - lastStatusPrint >= 5000
+    ) {
+        lastStatusPrint = now;
+
+        Serial.print("Wi-Fi: ");
+        Serial.println(getWiFiStatus(status));
+    }
+
+    // Nova tentativa a cada 15 segundos, sem bloquear o loop.
+    if (now - lastConnectionAttempt >= 15000) {
+        lastConnectionAttempt = now;
+
+        Serial.println("Tentando reconectar ao Wi-Fi...");
+        WiFi.reconnect();
+    }
+}
+
+bool WiFiManager::isConnected() const {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+bool WiFiManager::isTimeSynced() const {
+    return timeSynced;
 }

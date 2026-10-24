@@ -42,28 +42,21 @@ int value = 0;
 
 
 void setup() {
+    Serial.begin(9600);
 
-  Serial.begin(9600);
-  led.blink(500, 2);
-  printf("Iniciando...\n");
-  wifi.begin();
-  mqtt.begin();
+    Serial.println("Iniciando...");
 
+    wifi.begin();
+    mqtt.begin();
+
+    // Inicia as piscadas sem bloquear.
+    led.blink(500, 2);
 }
 
 // ===============================
 
 void loop() {
-  if (!mqtt.connected()) {
-    mqtt.reconnect();
-    if (mqtt.connected()) {
-        led.blink(100, 10);
-    }
-  }
-
-  mqtt.loop();
-
-  unsigned long now = millis();
-
-
+    wifi.loop();
+    led.update();
+    mqtt.loop();
 }
